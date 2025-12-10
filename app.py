@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import time
 from pathlib import Path
 from typing import Optional
 
@@ -39,13 +40,19 @@ def main() -> None:
     args = parse_args()
     pipeline = VisionPipeline(args.model)
 
-    def _acquire_from_manager(manager) -> Optional[cv2.Mat]:
-        """Grab a single frame from the given camera manager."""
+    def _acquire_from_manager(manager, timeout: float = 3.0) -> Optional[cv2.Mat]:
+        """Grab a single frame from the given camera manager with a wait loop."""
 
         with manager.session() as cam:
+            deadline = time.monotonic() + timeout
             frame = cam.grab()
+            # wait for a frame if the stream needs time to warm up
+            while frame is None and time.monotonic() < deadline:
+                LOGGER.info("等待摄像头返回帧……")
+                time.sleep(0.1)
+                frame = cam.grab()
             if frame is None:
-                LOGGER.error("No frame received from camera")
+                LOGGER.error("No frame received from camera (timeout %.1fs)", timeout)
                 return None
             if args.save:
                 args.save.parent.mkdir(parents=True, exist_ok=True)
@@ -92,7 +99,7 @@ def main() -> None:
                     )
                     return
             if image is None:
-                LOGGER.error("无法获取图像：摄像头未返回帧")
+                LOGGER.error("无法获取图像：摄像头未返回帧，请检查连接或使用 --image 指定图片")
                 return
 
     template_image = load_image(args.template) if args.template else None
