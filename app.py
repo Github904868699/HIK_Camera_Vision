@@ -39,43 +39,61 @@ def main() -> None:
     args = parse_args()
     pipeline = VisionPipeline(args.model)
 
+    def _acquire_from_manager(manager) -> Optional[cv2.Mat]:
+        """Grab a single frame from the given camera manager."""
+
+        with manager.session() as cam:
+            frame = cam.grab()
+            if frame is None:
+                LOGGER.error("No frame received from camera")
+                return None
+            if args.save:
+                args.save.parent.mkdir(parents=True, exist_ok=True)
+                cv2.imwrite(str(args.save), frame.data)
+            return frame.data
+
     if args.camera and args.usb is not None:
         LOGGER.error("--camera and --usb are mutually exclusive")
         return
 
     if args.camera:
         manager = CameraManager()
-        with manager.session() as cam:
-            frame = cam.grab()
-            if frame is None:
-                LOGGER.error("No frame received from Hikvision camera")
-                return
-            image = frame.data
-            if args.save:
-                args.save.parent.mkdir(parents=True, exist_ok=True)
-                cv2.imwrite(str(args.save), image)
+        image = _acquire_from_manager(manager)
+        if image is None:
+            return
     elif args.usb is not None:
         manager = USBCameraManager(
             device_index=args.usb,
             width=args.usb_width,
             height=args.usb_height,
         )
-        with manager.session() as cam:
-            frame = cam.grab()
-            if frame is None:
-                LOGGER.error("No frame received from USB camera")
-                return
-            image = frame.data
-            if args.save:
-                args.save.parent.mkdir(parents=True, exist_ok=True)
-                cv2.imwrite(str(args.save), image)
-    else:
-        if not args.image:
-            LOGGER.error("--image is required when --camera is not set")
-            return
-        image = load_image(args.image)
+        image = _acquire_from_manager(manager)
         if image is None:
             return
+    else:
+        if args.image:
+            image = load_image(args.image)
+            if image is None:
+                return
+        else:
+            LOGGER.info("No --image provided, attempting to open USB camera 0 for quick debugging...")
+            try:
+                image = _acquire_from_manager(
+                    USBCameraManager(device_index=0, width=args.usb_width, height=args.usb_height)
+                )
+            except Exception as exc:  # pragma: no cover - runtime hardware guard
+                LOGGER.warning("USB camera 0 unavailable (%s). Trying Hikvision config...", exc)
+                try:
+                    image = _acquire_from_manager(CameraManager())
+                except Exception as hik_exc:  # pragma: no cover - runtime hardware guard
+                    LOGGER.error(
+                        "无法获取图像：未提供 --image，且 USB 摄像头/Hikvision 摄像头均未成功打开 (%s)",
+                        hik_exc,
+                    )
+                    return
+            if image is None:
+                LOGGER.error("无法获取图像：摄像头未返回帧")
+                return
 
     template_image = load_image(args.template) if args.template else None
     result = pipeline.run(image, template_image)
