@@ -8,6 +8,7 @@ from __future__ import annotations
 import contextlib
 import logging
 import threading
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Generator, Optional
@@ -70,6 +71,73 @@ class CameraManager:
 
     @contextlib.contextmanager
     def session(self) -> Generator["CameraManager", None, None]:
+        try:
+            self.open()
+            yield self
+        finally:
+            self.close()
+
+
+class USBCameraManager:
+    """Lightweight OpenCV-based camera manager for USB webcams."""
+
+    def __init__(
+        self,
+        device_index: int = 0,
+        width: Optional[int] = None,
+        height: Optional[int] = None,
+        read_interval: float = 0.01,
+    ) -> None:
+        self.device_index = device_index
+        self.width = width
+        self.height = height
+        self.read_interval = read_interval
+        self._cap: Optional[cv2.VideoCapture] = None
+        self._latest_frame: Optional[Frame] = None
+        self._lock = threading.Lock()
+        self._thread: Optional[threading.Thread] = None
+        self._running = threading.Event()
+
+    def _reader(self) -> None:
+        assert self._cap is not None
+        while self._running.is_set():
+            ok, frame = self._cap.read()
+            if not ok:
+                LOGGER.warning("USB camera %s read failed", self.device_index)
+                time.sleep(max(self.read_interval, 0.05))
+                continue
+            with self._lock:
+                self._latest_frame = Frame(frame, time.time())
+            time.sleep(self.read_interval)
+
+    def open(self) -> None:
+        LOGGER.info("Opening USB camera index %s", self.device_index)
+        self._cap = cv2.VideoCapture(self.device_index)
+        if not self._cap.isOpened():
+            raise RuntimeError(f"Unable to open USB camera {self.device_index}")
+        if self.width:
+            self._cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.width)
+        if self.height:
+            self._cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.height)
+        self._running.set()
+        self._thread = threading.Thread(target=self._reader, daemon=True)
+        self._thread.start()
+
+    def close(self) -> None:
+        self._running.clear()
+        if self._thread and self._thread.is_alive():
+            self._thread.join(timeout=1.0)
+        self._thread = None
+        if self._cap is not None:
+            self._cap.release()
+            self._cap = None
+
+    def grab(self) -> Optional[Frame]:
+        with self._lock:
+            return self._latest_frame
+
+    @contextlib.contextmanager
+    def session(self) -> Generator["USBCameraManager", None, None]:
         try:
             self.open()
             yield self
